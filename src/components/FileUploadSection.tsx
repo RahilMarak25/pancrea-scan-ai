@@ -2,12 +2,15 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Upload, Folder, AlertCircle, CheckCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/hooks/useAuth";
 
 export const FileUploadSection = () => {
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const { toast } = useToast();
+  const { user } = useAuth();
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -32,20 +35,72 @@ export const FileUploadSection = () => {
       return;
     }
 
+    if (!user) {
+      toast({
+        title: "Authentication Required",
+        description: "Please sign in to analyze DICOM files",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setIsAnalyzing(true);
     
-    // Simulate analysis (replace with actual API call)
-    setTimeout(() => {
+    try {
+      // Upload files to Supabase Storage
+      const uploadPromises = Array.from(selectedFiles).map(async (file) => {
+        const fileName = `${user.id}/${Date.now()}-${file.name}`;
+        const { error } = await supabase.storage
+          .from('dicom-files')
+          .upload(fileName, file);
+        
+        if (error) throw error;
+        return fileName;
+      });
+
+      await Promise.all(uploadPromises);
+
+      // Simulate analysis (replace with actual API call to your ML backend)
       const mockResult = Math.random() > 0.5 ? "No Tumor Detected" : "Tumor Detected";
+      const mockConfidence = Math.random() * 0.3 + 0.7; // Random confidence between 0.7-1.0
+      
+      // Save analysis result to database
+      const { error: dbError } = await supabase
+        .from('analysis_results')
+        .insert({
+          user_id: user.id,
+          file_count: selectedFiles.length,
+          result: mockResult,
+          confidence_score: mockConfidence,
+          dicom_folder_path: `${user.id}/${Date.now()}`,
+        });
+
+      if (dbError) {
+        console.error('Database error:', dbError);
+        toast({
+          title: "Error saving results",
+          description: "Analysis completed but couldn't save to history",
+          variant: "destructive",
+        });
+      }
+
       setResult(mockResult);
-      setIsAnalyzing(false);
       
       toast({
         title: "Analysis Complete",
-        description: mockResult,
+        description: `${mockResult} (${(mockConfidence * 100).toFixed(1)}% confidence)`,
         variant: mockResult.includes("No") ? "default" : "destructive",
       });
-    }, 3000);
+    } catch (error) {
+      console.error('Analysis error:', error);
+      toast({
+        title: "Analysis Failed",
+        description: "An error occurred during analysis. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   return (
