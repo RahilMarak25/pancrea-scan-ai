@@ -14,7 +14,66 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      analysis_results: {
+        Row: {
+          analysis_date: string
+          confidence_score: number | null
+          created_at: string
+          dicom_folder_path: string | null
+          file_count: number
+          id: string
+          result: string
+          user_id: string
+        }
+        Insert: {
+          analysis_date?: string
+          confidence_score?: number | null
+          created_at?: string
+          dicom_folder_path?: string | null
+          file_count: number
+          id?: string
+          result: string
+          user_id: string
+        }
+        Update: {
+          analysis_date?: string
+          confidence_score?: number | null
+          created_at?: string
+          dicom_folder_path?: string | null
+          file_count?: number
+          id?: string
+          result?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          display_name: string | null
+          email: string | null
+          id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          display_name?: string | null
+          email?: string | null
+          id?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          display_name?: string | null
+          email?: string | null
+          id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
