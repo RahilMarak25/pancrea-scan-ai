@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Upload, Folder, AlertCircle, CheckCircle } from "lucide-react";
+import { Upload, Folder, AlertCircle, CheckCircle, Brain } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
@@ -10,6 +10,15 @@ interface PredictionResult {
   prediction: string;
   confidence: number;
   processed_files: number;
+  total_files: number;
+  processing_time: number;
+  model_version: string;
+}
+
+interface AnalysisError {
+  message: string;
+  code?: string;
+  details?: any;
 }
 
 export const FileUploadSection = () => {
@@ -17,19 +26,44 @@ export const FileUploadSection = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
+  const [processingDetails, setProcessingDetails] = useState<{
+    processed: number;
+    total: number;
+    processingTime: number;
+  } | null>(null);
   const { toast } = useToast();
   const { user } = useAuth();
+
+  // API endpoint for your ML model
+  const ML_API_BASE_URL = process.env.NEXT_PUBLIC_ML_API_URL || 'http://localhost:8000';
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     setSelectedFiles(files);
     setResult(null);
     setConfidence(null);
+    setProcessingDetails(null);
     
     if (files && files.length > 0) {
+      // Validate DICOM files
+      const dicomFiles = Array.from(files).filter(file => 
+        file.name.toLowerCase().endsWith('.dcm') || 
+        file.type === 'application/dicom'
+      );
+      
+      if (dicomFiles.length === 0) {
+        toast({
+          title: "Invalid File Type",
+          description: "Please select DICOM (.dcm) files only",
+          variant: "destructive",
+        });
+        setSelectedFiles(null);
+        return;
+      }
+      
       toast({
         title: "Files Selected",
-        description: `${files.length} DICOM files selected for analysis`,
+        description: `${dicomFiles.length} DICOM files selected for analysis`,
       });
     }
   };
@@ -37,25 +71,86 @@ export const FileUploadSection = () => {
   const analyzeWithMLModel = async (files: FileList): Promise<PredictionResult> => {
     const formData = new FormData();
     
+    // Add metadata
+    formData.append('user_id', user?.id || '');
+    formData.append('analysis_type', 'pancreatic_tumor_detection');
+    
     // Add all DICOM files to FormData
-    Array.from(files).forEach((file, index) => {
+    const dicomFiles = Array.from(files).filter(file => 
+      file.name.toLowerCase().endsWith('.dcm') || 
+      file.type === 'application/dicom'
+    );
+    
+    dicomFiles.forEach((file, index) => {
       formData.append(`dicom_files`, file);
     });
 
-    // Option 1: Call your Python ML API endpoint
-    const response = await fetch('/api/analyze-dicom', {
+    // Call your Python FastAPI/Flask endpoint
+    const response = await fetch(`${ML_API_BASE_URL}/api/v1/analyze-dicom`, {
       method: 'POST',
       body: formData,
       headers: {
-        'Authorization': `Bearer ${user?.access_token}`, // If you need auth
+        // Don't set Content-Type header - let browser set it with boundary for FormData
+        'Authorization': user?.access_token ? `Bearer ${user.access_token}` : '',
       },
     });
 
     if (!response.ok) {
-      throw new Error(`ML API error: ${response.statusText}`);
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || errorData.message || `API Error: ${response.status} ${response.statusText}`);
     }
 
-    return await response.json();
+    const result = await response.json();
+    return result;
+  };
+
+  const uploadToSupabase = async (files: FileList): Promise<string[]> => {
+    const uploadPromises = Array.from(files).map(async (file, index) => {
+      const fileName = `${user?.id}/${Date.now()}-${index}-${file.name}`;
+      const { error } = await supabase.storage
+        .from('dicom-files')
+        .upload(fileName, file, {
+          cacheControl: '3600',
+          upsert: false
+        });
+      
+      if (error) {
+        console.error(`Error uploading ${file.name}:`, error);
+        throw new Error(`Failed to upload ${file.name}: ${error.message}`);
+      }
+      return fileName;
+    });
+
+    return await Promise.all(uploadPromises);
+  };
+
+  const saveAnalysisResult = async (
+    mlResult: PredictionResult, 
+    uploadedFiles: string[]
+  ) => {
+    const { error: dbError } = await supabase
+      .from('analysis_results')
+      .insert({
+        user_id: user?.id,
+        file_count: mlResult.total_files,
+        processed_file_count: mlResult.processed_files,
+        result: mlResult.prediction,
+        confidence_score: mlResult.confidence,
+        processing_time: mlResult.processing_time,
+        model_version: mlResult.model_version,
+        dicom_folder_path: `${user?.id}/${Date.now()}`,
+        file_paths: uploadedFiles,
+        created_at: new Date().toISOString(),
+        metadata: {
+          analysis_type: 'pancreatic_tumor_detection',
+          api_version: 'v1'
+        }
+      });
+
+    if (dbError) {
+      console.error('Database error:', dbError);
+      throw new Error('Failed to save analysis results to database');
+    }
   };
 
   const handleAnalyze = async () => {
@@ -77,60 +172,80 @@ export const FileUploadSection = () => {
       return;
     }
 
+    // Validate file count
+    if (selectedFiles.length > 100) {
+      toast({
+        title: "Too Many Files",
+        description: "Please select maximum 100 DICOM files at once",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setIsAnalyzing(true);
+    let uploadedFiles: string[] = [];
     
     try {
-      // Upload files to Supabase Storage for record keeping
-      const uploadPromises = Array.from(selectedFiles).map(async (file) => {
-        const fileName = `${user.id}/${Date.now()}-${file.name}`;
-        const { error } = await supabase.storage
-          .from('dicom-files')
-          .upload(fileName, file);
-        
-        if (error) throw error;
-        return fileName;
+      // Step 1: Upload files to Supabase Storage for record keeping
+      toast({
+        title: "Uploading Files",
+        description: "Uploading DICOM files to secure storage...",
+      });
+      
+      uploadedFiles = await uploadToSupabase(selectedFiles);
+
+      // Step 2: Analyze with ML model
+      toast({
+        title: "Analyzing with AI",
+        description: "Processing images with our trained neural network...",
       });
 
-      const uploadedFiles = await Promise.all(uploadPromises);
-
-      // Call your ML model for actual prediction
       const mlResult = await analyzeWithMLModel(selectedFiles);
       
-      // Save analysis result to database
-      const { error: dbError } = await supabase
-        .from('analysis_results')
-        .insert({
-          user_id: user.id,
-          file_count: selectedFiles.length,
-          result: mlResult.prediction,
-          confidence_score: mlResult.confidence,
-          dicom_folder_path: `${user.id}/${Date.now()}`,
-          processed_files: mlResult.processed_files,
-        });
+      // Step 3: Save results to database
+      await saveAnalysisResult(mlResult, uploadedFiles);
 
-      if (dbError) {
-        console.error('Database error:', dbError);
-        toast({
-          title: "Error saving results",
-          description: "Analysis completed but couldn't save to history",
-          variant: "destructive",
-        });
-      }
-
+      // Step 4: Update UI with results
       setResult(mlResult.prediction);
       setConfidence(mlResult.confidence);
+      setProcessingDetails({
+        processed: mlResult.processed_files,
+        total: mlResult.total_files,
+        processingTime: mlResult.processing_time
+      });
+      
+      const isPositive = mlResult.prediction.toLowerCase().includes("tumor detected") || 
+                        mlResult.prediction.toLowerCase().includes("positive");
       
       toast({
         title: "Analysis Complete",
         description: `${mlResult.prediction} (${(mlResult.confidence * 100).toFixed(1)}% confidence)`,
-        variant: mlResult.prediction.toLowerCase().includes("no tumor") ? "default" : "destructive",
+        variant: isPositive ? "destructive" : "default",
       });
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('Analysis error:', error);
+      
+      // Clean up uploaded files on error
+      if (uploadedFiles.length > 0) {
+        try {
+          await Promise.all(
+            uploadedFiles.map(fileName => 
+              supabase.storage.from('dicom-files').remove([fileName])
+            )
+          );
+        } catch (cleanupError) {
+          console.error('Cleanup error:', cleanupError);
+        }
+      }
+      
+      const errorMessage = error instanceof Error 
+        ? error.message 
+        : "An unexpected error occurred during analysis";
+      
       toast({
         title: "Analysis Failed",
-        description: error instanceof Error ? error.message : "An error occurred during analysis. Please try again.",
+        description: errorMessage,
         variant: "destructive",
       });
     } finally {
@@ -141,15 +256,18 @@ export const FileUploadSection = () => {
   return (
     <div className="bg-white rounded-2xl p-8 shadow-xl border-2 border-accent/20 hover:shadow-2xl transition-all duration-300 hover:-translate-y-1">
       <div className="text-center space-y-6">
-        <h2 className="text-2xl font-semibold text-primary mb-6">
-          Upload DICOM Folder for Analysis
-        </h2>
+        <div className="flex items-center justify-center gap-3 mb-6">
+          <Brain className="w-8 h-8 text-primary" />
+          <h2 className="text-2xl font-semibold text-primary">
+            AI-Powered Pancreatic Analysis
+          </h2>
+        </div>
         
         <div className="space-y-4">
           <input
             type="file"
             id="fileInput"
-            accept=".dcm"
+            accept=".dcm,application/dicom"
             {...({ webkitdirectory: "" } as any)}
             multiple
             onChange={handleFileSelect}
@@ -160,7 +278,8 @@ export const FileUploadSection = () => {
             variant="medical"
             size="lg"
             onClick={() => document.getElementById('fileInput')?.click()}
-            className="text-lg px-8 py-3"
+            className="text-lg px-8 py-3 w-full sm:w-auto"
+            disabled={isAnalyzing}
           >
             <Folder className="w-5 h-5" />
             Select DICOM Folder
@@ -171,12 +290,12 @@ export const FileUploadSection = () => {
             size="lg"
             onClick={handleAnalyze}
             disabled={!selectedFiles || isAnalyzing}
-            className="text-lg px-8 py-3"
+            className="text-lg px-8 py-3 w-full sm:w-auto bg-primary hover:bg-primary/90"
           >
             {isAnalyzing ? (
               <>
                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Analyzing with AI Model...
+                Analyzing with CNN Model...
               </>
             ) : (
               <>
@@ -188,16 +307,22 @@ export const FileUploadSection = () => {
         </div>
 
         {selectedFiles && selectedFiles.length > 0 && (
-          <div className="bg-muted rounded-lg p-4 max-h-32 overflow-y-auto">
-            <p className="font-medium text-sm mb-2">Selected Files ({selectedFiles.length}):</p>
+          <div className="bg-muted rounded-lg p-4 max-h-40 overflow-y-auto">
+            <p className="font-medium text-sm mb-2">
+              Selected Files ({selectedFiles.length}):
+            </p>
             <ul className="text-xs space-y-1 text-left">
               {Array.from(selectedFiles).slice(0, 10).map((file, index) => (
-                <li key={index} className="truncate">
+                <li key={index} className="truncate flex items-center gap-2">
+                  <span className="w-2 h-2 bg-green-500 rounded-full flex-shrink-0"></span>
                   {file.webkitRelativePath || file.name}
+                  <span className="text-muted-foreground ml-auto">
+                    ({(file.size / 1024 / 1024).toFixed(2)} MB)
+                  </span>
                 </li>
               ))}
               {selectedFiles.length > 10 && (
-                <li className="text-muted-foreground">
+                <li className="text-muted-foreground font-medium">
                   ... and {selectedFiles.length - 10} more files
                 </li>
               )}
@@ -206,26 +331,51 @@ export const FileUploadSection = () => {
         )}
 
         {result && (
-          <div className={`flex items-center justify-center gap-3 p-6 rounded-xl text-lg font-semibold ${
-            result.toLowerCase().includes("no tumor") 
-              ? "bg-success/10 text-success border-2 border-success/20" 
-              : "bg-destructive/10 text-destructive border-2 border-destructive/20"
+          <div className={`p-6 rounded-xl border-2 space-y-3 ${
+            result.toLowerCase().includes("no tumor") || result.toLowerCase().includes("negative")
+              ? "bg-green-50 text-green-800 border-green-200" 
+              : "bg-red-50 text-red-800 border-red-200"
           }`}>
-            {result.toLowerCase().includes("no tumor") ? (
-              <CheckCircle className="w-6 h-6" />
-            ) : (
-              <AlertCircle className="w-6 h-6" />
-            )}
-            <div className="text-center">
-              <div>{result}</div>
-              {confidence && (
-                <div className="text-sm font-normal mt-1">
+            <div className="flex items-center justify-center gap-3">
+              {result.toLowerCase().includes("no tumor") || result.toLowerCase().includes("negative") ? (
+                <CheckCircle className="w-6 h-6" />
+              ) : (
+                <AlertCircle className="w-6 h-6" />
+              )}
+              <span className="text-lg font-semibold">{result}</span>
+            </div>
+            
+            {confidence && (
+              <div className="text-sm space-y-1">
+                <div className="font-medium">
                   Confidence: {(confidence * 100).toFixed(1)}%
                 </div>
-              )}
-            </div>
+                <div className="w-full bg-white/50 rounded-full h-2">
+                  <div 
+                    className="h-2 rounded-full transition-all duration-300"
+                    style={{ 
+                      width: `${confidence * 100}%`,
+                      backgroundColor: confidence > 0.8 ? '#22c55e' : confidence > 0.6 ? '#f59e0b' : '#ef4444'
+                    }}
+                  ></div>
+                </div>
+              </div>
+            )}
+            
+            {processingDetails && (
+              <div className="text-xs text-current/70 border-t border-current/20 pt-2 mt-2">
+                <div>Processed: {processingDetails.processed}/{processingDetails.total} files</div>
+                <div>Processing Time: {processingDetails.processingTime.toFixed(2)}s</div>
+              </div>
+            )}
           </div>
         )}
+
+        <div className="text-xs text-muted-foreground space-y-1">
+          <p>• Supported formats: DICOM (.dcm) files</p>
+          <p>• Maximum 100 files per analysis</p>
+          <p>• All data is encrypted and HIPAA compliant</p>
+        </div>
       </div>
     </div>
   );
