@@ -5,10 +5,18 @@ import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 
+// Types for ML prediction
+interface PredictionResult {
+  prediction: string;
+  confidence: number;
+  processed_files: number;
+}
+
 export const FileUploadSection = () => {
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [confidence, setConfidence] = useState<number | null>(null);
   const { toast } = useToast();
   const { user } = useAuth();
 
@@ -16,6 +24,7 @@ export const FileUploadSection = () => {
     const files = event.target.files;
     setSelectedFiles(files);
     setResult(null);
+    setConfidence(null);
     
     if (files && files.length > 0) {
       toast({
@@ -23,6 +32,30 @@ export const FileUploadSection = () => {
         description: `${files.length} DICOM files selected for analysis`,
       });
     }
+  };
+
+  const analyzeWithMLModel = async (files: FileList): Promise<PredictionResult> => {
+    const formData = new FormData();
+    
+    // Add all DICOM files to FormData
+    Array.from(files).forEach((file, index) => {
+      formData.append(`dicom_files`, file);
+    });
+
+    // Option 1: Call your Python ML API endpoint
+    const response = await fetch('/api/analyze-dicom', {
+      method: 'POST',
+      body: formData,
+      headers: {
+        'Authorization': `Bearer ${user?.access_token}`, // If you need auth
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`ML API error: ${response.statusText}`);
+    }
+
+    return await response.json();
   };
 
   const handleAnalyze = async () => {
@@ -47,7 +80,7 @@ export const FileUploadSection = () => {
     setIsAnalyzing(true);
     
     try {
-      // Upload files to Supabase Storage
+      // Upload files to Supabase Storage for record keeping
       const uploadPromises = Array.from(selectedFiles).map(async (file) => {
         const fileName = `${user.id}/${Date.now()}-${file.name}`;
         const { error } = await supabase.storage
@@ -58,11 +91,10 @@ export const FileUploadSection = () => {
         return fileName;
       });
 
-      await Promise.all(uploadPromises);
+      const uploadedFiles = await Promise.all(uploadPromises);
 
-      // Simulate analysis (replace with actual API call to your ML backend)
-      const mockResult = Math.random() > 0.5 ? "No Tumor Detected" : "Tumor Detected";
-      const mockConfidence = Math.random() * 0.3 + 0.7; // Random confidence between 0.7-1.0
+      // Call your ML model for actual prediction
+      const mlResult = await analyzeWithMLModel(selectedFiles);
       
       // Save analysis result to database
       const { error: dbError } = await supabase
@@ -70,9 +102,10 @@ export const FileUploadSection = () => {
         .insert({
           user_id: user.id,
           file_count: selectedFiles.length,
-          result: mockResult,
-          confidence_score: mockConfidence,
+          result: mlResult.prediction,
+          confidence_score: mlResult.confidence,
           dicom_folder_path: `${user.id}/${Date.now()}`,
+          processed_files: mlResult.processed_files,
         });
 
       if (dbError) {
@@ -84,18 +117,20 @@ export const FileUploadSection = () => {
         });
       }
 
-      setResult(mockResult);
+      setResult(mlResult.prediction);
+      setConfidence(mlResult.confidence);
       
       toast({
         title: "Analysis Complete",
-        description: `${mockResult} (${(mockConfidence * 100).toFixed(1)}% confidence)`,
-        variant: mockResult.includes("No") ? "default" : "destructive",
+        description: `${mlResult.prediction} (${(mlResult.confidence * 100).toFixed(1)}% confidence)`,
+        variant: mlResult.prediction.toLowerCase().includes("no tumor") ? "default" : "destructive",
       });
+
     } catch (error) {
       console.error('Analysis error:', error);
       toast({
         title: "Analysis Failed",
-        description: "An error occurred during analysis. Please try again.",
+        description: error instanceof Error ? error.message : "An error occurred during analysis. Please try again.",
         variant: "destructive",
       });
     } finally {
@@ -141,12 +176,12 @@ export const FileUploadSection = () => {
             {isAnalyzing ? (
               <>
                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Analyzing...
+                Analyzing with AI Model...
               </>
             ) : (
               <>
                 <Upload className="w-5 h-5" />
-                Analyze DICOM Folder
+                Analyze with AI Model
               </>
             )}
           </Button>
@@ -172,16 +207,23 @@ export const FileUploadSection = () => {
 
         {result && (
           <div className={`flex items-center justify-center gap-3 p-6 rounded-xl text-lg font-semibold ${
-            result.includes("No") 
+            result.toLowerCase().includes("no tumor") 
               ? "bg-success/10 text-success border-2 border-success/20" 
               : "bg-destructive/10 text-destructive border-2 border-destructive/20"
           }`}>
-            {result.includes("No") ? (
+            {result.toLowerCase().includes("no tumor") ? (
               <CheckCircle className="w-6 h-6" />
             ) : (
               <AlertCircle className="w-6 h-6" />
             )}
-            <span>{result}</span>
+            <div className="text-center">
+              <div>{result}</div>
+              {confidence && (
+                <div className="text-sm font-normal mt-1">
+                  Confidence: {(confidence * 100).toFixed(1)}%
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
