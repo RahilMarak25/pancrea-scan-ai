@@ -34,8 +34,8 @@ export const FileUploadSection = () => {
   const { toast } = useToast();
   const { user, session } = useAuth();
 
-  // API endpoint for your ML model
-  const ML_API_BASE_URL = import.meta.env.VITE_ML_API_URL || 'http://localhost:8000';
+  // API endpoint for your deployed ML model
+  const ML_API_BASE_URL = 'https://your-deployed-api-url.com'; // Replace with your actual deployed URL
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
