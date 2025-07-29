@@ -172,15 +172,6 @@ export const FileUploadSection = () => {
       return;
     }
 
-    // Validate file count
-    if (selectedFiles.length > 100) {
-      toast({
-        title: "Too Many Files",
-        description: "Please select maximum 100 DICOM files at once",
-        variant: "destructive",
-      });
-      return;
-    }
 
     setIsAnalyzing(true);
     let uploadedFiles: string[] = [];
@@ -373,7 +364,7 @@ export const FileUploadSection = () => {
 
         <div className="text-xs text-muted-foreground space-y-1">
           <p>• Supported formats: DICOM (.dcm) files</p>
-          <p>• Maximum 100 files per analysis</p>
+          <p>• No limit on number of files per analysis</p>
           <p>• All data is encrypted and HIPAA compliant</p>
         </div>
       </div>
