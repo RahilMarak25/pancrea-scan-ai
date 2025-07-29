@@ -1,10 +1,10 @@
-# main.py - FastAPI backend for pancrea-scan-ai
+# backend/main.py - FastAPI backend for your React pancrea-scan-ai project
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
 import time
-import uuid
 import logging
 from typing import List, Optional
 import numpy as np
@@ -12,12 +12,9 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 import pydicom
 from PIL import Image
-import io
-from pathlib import Path
-import json
-from pydantic import BaseModel
 import tempfile
 import shutil
+from pydantic import BaseModel
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,15 +22,20 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Pancrea Scan AI - ML API",
-    description="AI-powered pancreatic tumor detection API",
+    title="Pancrea Scan AI - ML Backend",
+    description="AI-powered pancreatic tumor detection backend",
     version="1.0.0"
 )
 
-# CORS middleware
+# CORS middleware - Update with your React app URLs
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://your-domain.com"],  # Update with your frontend URLs
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://localhost:5173",  # Vite default port
+        "https://your-vercel-app.vercel.app",  # Add your deployed frontend URL
+        "https://lovable.dev"  # Your Lovable project URL
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,7 +48,18 @@ security = HTTPBearer(auto_error=False)
 model = None
 MODEL_VERSION = "CNN_v2.0"
 
-# Pydantic models
+# Model configuration for your 128x128 grayscale model
+MODEL_CONFIG = {
+    "input_shape": (128, 128, 1),  # Your model expects 128x128 grayscale images
+    "classes": ["No Tumor", "Tumor Detected"],
+    "preprocessing": {
+        "normalize": True,
+        "resize": (128, 128),
+        "grayscale_to_rgb": False  # Keep as grayscale since your model expects 1 channel
+    }
+}
+
+# Pydantic models for API responses
 class PredictionResponse(BaseModel):
     prediction: str
     confidence: float
@@ -61,26 +74,19 @@ class HealthResponse(BaseModel):
     model_version: Optional[str]
     timestamp: str
 
-# Model configuration
-MODEL_CONFIG = {
-    "input_shape": (128, 128, 1),  # Your model expects 128x128 grayscale images
-    "classes": ["No Tumor", "Tumor Detected"],  # Adjust based on your classes
-    "preprocessing": {
-        "normalize": True,
-        "resize": (128, 128),
-        "grayscale_to_rgb": False  # Keep as grayscale since your model expects 1 channel
-    }
-}
-
 def load_ml_model():
-    """Load the trained CNN model from Google Drive or local storage"""
+    """Load the trained CNN model"""
     global model
     
     # Try different model paths
     model_paths = [
-        "models/BEST_CNN2.keras",  # Local path
+        "BEST_CNN2.keras",  # Root directory
+        "models/BEST_CNN2.keras",  # Models folder
+        "backend/BEST_CNN2.keras",  # Backend folder
+        "backend/models/BEST_CNN2.keras",
         "/app/models/BEST_CNN2.keras",  # Docker path
-        os.getenv("MODEL_PATH", "models/BEST_CNN2.keras")  # Environment variable
+        os.path.join(os.path.dirname(__file__), "BEST_CNN2.keras"),
+        os.path.join(os.path.dirname(__file__), "models", "BEST_CNN2.keras"),
     ]
     
     for model_path in model_paths:
@@ -93,75 +99,51 @@ def load_ml_model():
             logger.error(f"Failed to load model from {model_path}: {e}")
             continue
     
-    # If local loading fails, try downloading from Google Drive
-    try:
-        model = load_model_from_drive()
-        if model:
-            logger.info("Model loaded successfully from Google Drive")
-            return True
-    except Exception as e:
-        logger.error(f"Failed to load model from Google Drive: {e}")
-    
-    logger.error("Could not load model from any source")
+    logger.error("Could not load model. Please ensure BEST_CNN2.keras is in your project directory.")
     return False
 
-def load_model_from_drive():
-    """Load model directly from Google Drive (if you make it publicly accessible)"""
-    # Option 1: If you have a direct download link from Google Drive
-    # google_drive_url = "https://drive.google.com/uc?id=YOUR_FILE_ID"
-    
-    # Option 2: Use Google Drive API (requires authentication)
-    # This is more complex but more secure
-    
-    # For now, return None - you'll need to implement this based on your setup
-    logger.warning("Google Drive loading not implemented. Please place model in local path.")
-    return None
-
-def preprocess_dicom(dicom_path: str) -> Optional[np.ndarray]:
+def preprocess_dicom_for_cnn(dicom_path: str) -> Optional[np.ndarray]:
     """
-    Preprocess DICOM file for CNN input
-    Adjust this function based on your model's training preprocessing
+    Preprocess DICOM file for your 128x128 grayscale CNN model
     """
     try:
         # Read DICOM file
         dicom_data = pydicom.dcmread(dicom_path, force=True)
         
-        # Handle different DICOM formats
+        # Extract pixel array
         if hasattr(dicom_data, 'pixel_array'):
             pixel_array = dicom_data.pixel_array
         else:
             logger.warning(f"No pixel array found in {dicom_path}")
             return None
         
-        # Convert to float32
+        # Convert to float32 and normalize pixel values
         pixel_array = pixel_array.astype(np.float32)
         
-        # Handle different bit depths and normalize
+        # Handle different bit depths
         if pixel_array.max() > 255:
-            # Likely 16-bit or higher, normalize to 0-255
+            # Normalize to 0-255 range
             pixel_array = ((pixel_array - pixel_array.min()) / 
                           (pixel_array.max() - pixel_array.min()) * 255)
         
         # Convert to PIL Image for resizing
         img = Image.fromarray(pixel_array.astype(np.uint8))
         
-        # Resize to model input size (128x128)
-        target_size = MODEL_CONFIG["preprocessing"]["resize"]
-        img = img.resize(target_size, Image.LANCZOS)
+        # Resize to 128x128 (your model's input size)
+        img = img.resize((128, 128), Image.LANCZOS)
         
-        # Keep as grayscale since your model expects single channel
+        # Ensure grayscale (your model expects single channel)
         if img.mode != 'L':
             img = img.convert('L')
         
         # Convert to numpy array
         img_array = np.array(img)
         
-        # Add channel dimension for grayscale (128, 128) -> (128, 128, 1)
+        # Add channel dimension: (128, 128) -> (128, 128, 1)
         img_array = np.expand_dims(img_array, axis=-1)
         
-        # Normalize if required
-        if MODEL_CONFIG["preprocessing"]["normalize"]:
-            img_array = img_array / 255.0
+        # Normalize to 0-1 range
+        img_array = img_array / 255.0
         
         return img_array
     
@@ -169,7 +151,7 @@ def preprocess_dicom(dicom_path: str) -> Optional[np.ndarray]:
         logger.error(f"Error preprocessing DICOM {dicom_path}: {e}")
         return None
 
-def predict_batch(images: List[np.ndarray]) -> tuple:
+def predict_tumor_batch(images: List[np.ndarray]) -> tuple:
     """Make predictions on a batch of preprocessed images"""
     if model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
@@ -181,13 +163,13 @@ def predict_batch(images: List[np.ndarray]) -> tuple:
         # Make predictions
         predictions = model.predict(batch, verbose=0)
         
-        # Process predictions based on your model output
+        # Process predictions based on your model's output format
         if len(predictions.shape) == 2 and predictions.shape[1] == 1:
             # Binary classification with sigmoid output
             confidences = predictions.flatten()
             predicted_classes = (confidences > 0.5).astype(int)
-        elif len(predictions.shape) == 2 and predictions.shape[1] > 1:
-            # Multi-class classification with softmax output
+        elif len(predictions.shape) == 2 and predictions.shape[1] == 2:
+            # Binary classification with softmax output  
             confidences = np.max(predictions, axis=1)
             predicted_classes = np.argmax(predictions, axis=1)
         else:
@@ -202,18 +184,18 @@ def predict_batch(images: List[np.ndarray]) -> tuple:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 async def verify_auth(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Simple auth verification - implement your own logic"""
+    """Simple auth verification - integrate with your Supabase auth if needed"""
     if credentials is None:
         return None  # Allow anonymous access for now
     
     # TODO: Implement proper JWT token verification with Supabase
-    # For now, just return a dummy user
+    # You can verify the JWT token with Supabase here
     return {"id": "user_123", "email": "user@example.com"}
 
 @app.on_event("startup")
 async def startup_event():
     """Load model on startup"""
-    logger.info("Starting up Pancrea Scan AI API...")
+    logger.info("Starting up Pancrea Scan AI ML Backend...")
     success = load_ml_model()
     if not success:
         logger.warning("Model could not be loaded. API will run but predictions will fail.")
@@ -239,6 +221,7 @@ async def analyze_dicom(
 ):
     """
     Analyze DICOM files for pancreatic tumor detection
+    This endpoint matches the format expected by your React component
     """
     start_time = time.time()
     
@@ -278,8 +261,8 @@ async def analyze_dicom(
                 with open(temp_file_path, "wb") as buffer:
                     shutil.copyfileobj(file.file, buffer)
                 
-                # Preprocess DICOM
-                processed_img = preprocess_dicom(temp_file_path)
+                # Preprocess DICOM for your CNN model
+                processed_img = preprocess_dicom_for_cnn(temp_file_path)
                 
                 if processed_img is not None:
                     processed_images.append(processed_img)
@@ -297,8 +280,8 @@ async def analyze_dicom(
                 detail="No valid DICOM files could be processed"
             )
         
-        # Make predictions
-        predicted_classes, confidences = predict_batch(processed_images)
+        # Make predictions using your CNN model
+        predicted_classes, confidences = predict_tumor_batch(processed_images)
         
         # Aggregate results
         # Strategy: If any image shows tumor (class 1), classify as tumor detected
@@ -349,17 +332,12 @@ async def get_model_info():
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    try:
-        return {
-            "model_version": MODEL_VERSION,
-            "input_shape": MODEL_CONFIG["input_shape"],
-            "classes": MODEL_CONFIG["classes"],
-            "preprocessing": MODEL_CONFIG["preprocessing"],
-            "model_summary": str(model.summary()) if hasattr(model, 'summary') else None
-        }
-    except Exception as e:
-        logger.error(f"Error getting model info: {e}")
-        raise HTTPException(status_code=500, detail="Could not retrieve model information")
+    return {
+        "model_version": MODEL_VERSION,
+        "input_shape": MODEL_CONFIG["input_shape"],
+        "classes": MODEL_CONFIG["classes"],
+        "preprocessing": MODEL_CONFIG["preprocessing"],
+    }
 
 if __name__ == "__main__":
     import uvicorn
