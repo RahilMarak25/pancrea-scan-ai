@@ -35,7 +35,8 @@ export const FileUploadSection = () => {
   const { user, session } = useAuth();
 
   // API endpoint for your deployed ML model
-  const ML_API_BASE_URL = 'https://your-deployed-api-url.com'; // Replace with your actual deployed URL
+  // Replace this URL with your deployed Flask API URL after deployment
+  const ML_API_BASE_URL = 'https://your-flask-api-url.com'; // TODO: Update this URL after deploying your Flask API
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
