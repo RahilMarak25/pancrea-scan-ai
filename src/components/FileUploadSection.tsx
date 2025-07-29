@@ -32,10 +32,10 @@ export const FileUploadSection = () => {
     processingTime: number;
   } | null>(null);
   const { toast } = useToast();
-  const { user } = useAuth();
+  const { user, session } = useAuth();
 
   // API endpoint for your ML model
-  const ML_API_BASE_URL = process.env.NEXT_PUBLIC_ML_API_URL || 'http://localhost:8000';
+  const ML_API_BASE_URL = import.meta.env.VITE_ML_API_URL || 'http://localhost:8000';
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -91,7 +91,7 @@ export const FileUploadSection = () => {
       body: formData,
       headers: {
         // Don't set Content-Type header - let browser set it with boundary for FormData
-        'Authorization': user?.access_token ? `Bearer ${user.access_token}` : '',
+        'Authorization': session?.access_token ? `Bearer ${session.access_token}` : '',
       },
     });
 
